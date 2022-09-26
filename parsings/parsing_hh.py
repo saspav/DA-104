@@ -3,6 +3,8 @@ import re
 import time
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_string_dtype
+from sklearn.impute import KNNImputer
 import json
 import queue
 import random
@@ -87,7 +89,7 @@ class ParsingHH:
     Класс для парсинга https://api.hh.ru
     """
 
-    def __init__(self, path_file=None):
+    def __init__(self, path_file=None, postfix=''):
         """
         Инициализация экземпляра класса
         :param path_file: рабочий каталог для файлов
@@ -113,7 +115,7 @@ class ParsingHH:
                                         'employer_name',
                                         'open_vacancies'])
         # итоговый файл с работодателями
-        name_file = 'all_employers.csv'
+        name_file = f'all_employers{postfix}.csv'
         self.file_csv = os.path.join(self.path_file, name_file)
         # файл с логами обработки индексов работодателей
         self.file_log = os.path.join(self.path_file,
@@ -122,6 +124,8 @@ class ParsingHH:
         self.rows_in_df = 0
         self.employer_ids = set()
         self.employer_ids_excel = set()
+        self.specializations = list()
+        self.add_it_specs = ['12.92', '14.91', '15.93', '8.356', '9.94']
 
         self.rq_time = None
         # ДФ с работодателями из постраничного парсинга
@@ -160,14 +164,16 @@ class ParsingHH:
         # очередь с обработанными данными
         self.data_queue = queue.Queue()
         # каталог файлов с работодателями, собранные разными методами
-        self.path_employers = os.path.join(self.path_file, 'employers')
+        self.path_employers = os.path.join(self.path_file,
+                                           f'employers{postfix}')
         # каталог для сохранения загруженных страниц .json
         self.json_path = os.path.join(self.path_to_save_files,
-                                      'employers_pages')
+                                      f'employers_pages{postfix}')
         if not os.path.exists(self.json_path):
             os.makedirs(self.json_path)
         # файл куда будем собирать работодателей со страниц .json
-        self.json_to_csv = os.path.join(self.path_file, 'pages_employers.csv')
+        self.json_to_csv = os.path.join(self.path_file,
+                                        f'pages_employers{postfix}.csv')
         self.pattern = re.compile("<.*?>")
         # Датафрейм с собранными вакансиями
         self.df_vacancies = pd.DataFrame()
@@ -175,21 +181,22 @@ class ParsingHH:
         self.errors_captcha_required = False
         # файл с логами обработки не существующих вакансий
         self.errors_vacancies_log = os.path.join(self.path_file,
-                                                 'errors_vacancies.log')
+                                                 f'errors_vacancies{postfix}.log')
         self.errors_vacancies = set()
         # каталог для сохранения вакансий работодателя
         self.parsed_employers = os.path.join(self.path_to_save_files,
-                                             'parsed_employers')
+                                             f'parsed_employers{postfix}')
         if not os.path.exists(self.parsed_employers):
             os.makedirs(self.parsed_employers)
         # итоговый файл с вакансиями
-        self.file_vacancies = os.path.join(self.path_file, 'all_vacancies.csv')
+        self.file_vacancies = os.path.join(self.path_file,
+                                           f'all_vacancies{postfix}.csv')
         # файл с логами обработки индексов работодателей с вакансиями
         self.parsed_employers_log = os.path.join(self.path_file,
-                                                 'parsed_employers.log')
+                                                 f'parsed_employers{postfix}.log')
         # файл для дозагрузки неполных вакансий
         self.incomplete_vacancies = os.path.join(self.parsed_employers,
-                                                 'incomplete_vacancies.csv')
+                                                 f'incomplete_vacancies{postfix}.csv')
         self.new_vacancy_rows = 0
         # Датафрейм с собранными неполными вакансиями
         self.df_incomplete = pd.DataFrame()
@@ -225,6 +232,12 @@ class ParsingHH:
         # множество индексов работодаталей для обработки
         self.idxs_employers = set()
         self.horizontal_bar = None
+
+    @staticmethod
+    def set_time_sleep(time_sleep):
+        time_sleep = round(random.random() * time_sleep, 1)
+        print(f'time_sleep={time_sleep}')
+        return time_sleep
 
     def get_time_sleep(self):
         time_sleep = self.delay if self.delay else 0
@@ -376,6 +389,29 @@ class ParsingHH:
     def print_read_msg(file_name):
         print(f'Читаю файл: {file_name}')
 
+    def processing_captcha(self, data_json):
+        """
+        Обработка ошибки 'captcha_required': формирование captcha_url
+        для ручного ввода капчи и запись его в файл
+        :param data_json: ответ сервера в формате json
+        :return: None
+        """
+        if data_json.get('errors'):
+            err = data_json.get('errors', [None])[0]
+            if isinstance(err, dict):
+                if err.get('value') == 'captcha_required':
+                    print('Словили капчу!!!')
+                    # ставим глобальный флаг, чтобы больше не читать вакансии
+                    self.errors_captcha_required = True
+                captcha_url = err.get('captcha_url')
+                if captcha_url:
+                    captcha_url += '&backurl=http://127.0.0.1:5500/index.html'
+                    print(captcha_url)
+                    # запишем в лог captcha_url
+                    file = os.path.join(self.path_file, 'captcha_url.log')
+                    with open(file, 'a+') as fw:
+                        fw.write(f'{captcha_url}\n')
+
     def download_page(self, url, params=dict(), ret_json=True):
         """
         Загрузка страницы
@@ -400,11 +436,14 @@ class ParsingHH:
             except HTTPError as http_error:
                 # print(f"HTTP error: {http_error}")
                 # print(f"Нет страницы: {url}")
-                if ret_json and request.json().get('errors', None) is not None:
-                    if request.json().get('description', None) is None:
-                        # словили ошибку про требование ввода капчи --> ставим
-                        # глобальный флаг, чтобы больше не читать вакансии
-                        self.errors_captcha_required = True
+                if ret_json:
+                    data_json = request.json()
+                    if data_json.get('errors', None) is not None:
+                        if data_json.get('description', None) is None:
+                            # словили ошибку 'captcha_required' --> ставим
+                            # глобальный флаг, чтобы больше не читать вакансии
+                            self.processing_captcha(data_json)
+
                 return request.json() if ret_json else request
             else:
                 return request.json() if ret_json else request
@@ -778,12 +817,16 @@ class ParsingHH:
         areas = self.get_areas()
         if areas_idxs:
             areas = areas[areas.area_id.isin(areas_idxs)]
+            # длинный список ломает json в параметрах запроса
+            if len(areas_idxs) > 10:
+                areas_idxs = []
         total = 0
         for row in areas.itertuples(index=False):
             self.files_queue.put((row.area_id, row.area_name))
             total += 1
+            # areas_idxs.append(row.area_id)
         print(f'Количество регионов для обработки: {total}')
-        data = self.get_employers_page()
+        data = self.get_employers_page(area=areas_idxs)
         total_pages = data['pages']
         print('Количество работодателей с вакансиями:', data['found'])
         print('Количество страниц:', total_pages)
@@ -926,45 +969,58 @@ class ParsingHH:
                                       self.file_reader,
                                       self.file_writer)
 
-    def get_vacancies_page(self, employer_id, area=113, page=0,
-                           date_from=None, date_to=None):
+    def get_vacancies_page(self, area=113, employer_id=None,
+                           specialization_id=None, experience=None,
+                           page=0, date_from=None, date_to=None):
         url = 'https://api.hh.ru/vacancies'
         params = {'area': area,
                   'employer_id': employer_id,
+                  'specialization': specialization_id,
+                  'experience': experience,
                   'per_page': 100,
                   'page': page,
                   'date_from': date_from,
                   'date_to': date_to,
+                  'responses_count_enabled': 'true'
                   }
         data = self.download_page(url, params)
         return data
 
-    def get_vacancies_pages(self, employer_id, area=113,
+    def get_vacancies_pages(self, load_enriched=True,
+                            area=113, employer_id=None,
+                            specialization_id=None, experience=None,
                             date_from=None, date_to=None, data=None):
         """
         Загрузка всех вакансий работодателя
-        :param employer_id: id работодателя
+        :param load_enriched: загружать саму вакансию
         :param area: регион
+        :param employer_id: id работодателя
+        :param specialization_id: id специализации
+        :param experience: id опыт работы
         :param date_from: дата с
         :param date_to: дата по
         :param data: данные, загруженные с нулевой страницы
         :return: ДФ с данными по вакансиям со всех страниц
         """
         if data is None:
-            data = self.get_vacancies_page(employer_id, area=area,
+            data = self.get_vacancies_page(area=area, employer_id=employer_id,
+                                           specialization_id=specialization_id,
+                                           experience=experience,
                                            date_from=date_from,
                                            date_to=date_to)
         total_pages = data['pages']
 
         if total_pages > 20:
             total_pages = 20
-        df = pd.DataFrame(columns=self.dict_keys + ('snippet', 'url'))
-
+        df = pd.DataFrame(columns=self.dict_keys + ('snippet', 'url',
+                                                    'counters'))
         vacancy_exist = set()
         if (self.checking_existing_vacancies or
                 self.load_missing_vacancy_fields):
             # проверка наличия вакансии в уже скачанных вакансий - достаем ДФ
-            name_attribute = f'df_{employer_id}'
+            name_attribute = self.get_name_attribute(employer_id=employer_id,
+                                                     area=area,
+                                                     specialization_id=specialization_id)
             if hasattr(ParsingHH, name_attribute):
                 vacancy_exist = getattr(ParsingHH, name_attribute)
                 if self.checking_existing_vacancies:
@@ -974,7 +1030,9 @@ class ParsingHH:
                     vacancy_exist = set(vacancy_exist[flt]['id'].to_list())
 
         for page in range(total_pages):
-            data = self.get_vacancies_page(employer_id, area=area,
+            data = self.get_vacancies_page(area=area, employer_id=employer_id,
+                                           specialization_id=specialization_id,
+                                           experience=experience,
                                            page=page,
                                            date_from=date_from,
                                            date_to=date_to)
@@ -989,10 +1047,11 @@ class ParsingHH:
 
                 url = item['url']
                 snippet = item.get('snippet', dict())
-
+                # количество откликов
+                counters = item.get('counters', dict()).get('responses', 0)
                 # если не было ошибки про требование ввода капчи -->
-                # читаем саму вакансию
-                if not self.errors_captcha_required:
+                # читаем саму вакансию, если load_enriched=True
+                if not self.errors_captcha_required and load_enriched:
                     print(url)
                     enriched = self.download_page(url)
                     if enriched.get('errors', None) is None:
@@ -1001,7 +1060,7 @@ class ParsingHH:
                         if enriched.get('description', None) is None:
                             # словили ошибку про требование ввода капчи->ставим
                             # глобальный флаг, чтобы больше не читать вакансии
-                            self.errors_captcha_required = True
+                            self.processing_captcha(enriched)
                         else:
                             # получили ошибку description": "Not Found"
                             item = None
@@ -1011,19 +1070,29 @@ class ParsingHH:
                     break
                 if item is not None:
                     df.loc[len(df)] = [*[item.get(key) for key
-                                         in self.dict_keys], snippet, url]
+                                         in self.dict_keys],
+                                       snippet, url, counters]
         return df
 
     @staticmethod
     def date_to_str(date):
         return date.strftime('%Y-%m-%d')
 
-    def get_employer_all_vacancies(self, employer_id, area=113,
+    @staticmethod
+    def get_name_attribute(employer_id=None, area=1, specialization_id=None):
+        if specialization_id:
+            return f'df_{area}_{str(specialization_id).replace(".", "_")}'
+        return f'df_{employer_id}'
+
+    def get_employer_all_vacancies(self, load_enriched=True, area=113,
+                                   employer_id=None, specialization_id=None,
                                    date_from=None, date_to=None, days_off=64):
         """
         Получение списка вакансий работодателя
-        :param employer_id: id работодателя
+        :param load_enriched: загружать саму вакансию
         :param area: регион
+        :param employer_id: id работодателя
+        :param specialization_id: id специализации
         :param date_from: дата с
         :param date_to: дата по
         :param days_off: диапазон в днях между датами
@@ -1035,7 +1104,8 @@ class ParsingHH:
         if date_to is None:
             date_to = date_now
 
-        data = self.get_vacancies_page(employer_id, area=area,
+        data = self.get_vacancies_page(area=area, employer_id=employer_id,
+                                       specialization_id=specialization_id,
                                        date_from=self.date_to_str(date_from),
                                        date_to=self.date_to_str(date_to))
 
@@ -1046,46 +1116,66 @@ class ParsingHH:
               f'вакансий: {found_vacancies}')
 
         if 0 < found_vacancies < 2001 or days_off < 2:
+            # атрибут класса - ДФ,
+            # в который собираются данные одного работодателя/региона
+            name_attribute = self.get_name_attribute(employer_id=employer_id,
+                                                     area=area,
+                                                     specialization_id=specialization_id)
+            if not hasattr(ParsingHH, name_attribute):
+                setattr(ParsingHH, name_attribute, pd.DataFrame())
+
             # добавление данных по вакансиям в ДФ одного работодателя -->
             # в функцию передать данные первой страницы
             date_from = self.date_to_str(date_from)
             date_to = self.date_to_str(date_to)
-            df_temp = self.get_vacancies_pages(employer_id,
-                                               area=area,
-                                               date_from=date_from,
-                                               date_to=date_to,
-                                               data=data)
-            # атрибут класса - ДФ,
-            # в который собираются данные одного работодателя
-            name_attribute = f'df_{employer_id}'
-            if not hasattr(ParsingHH, name_attribute):
-                setattr(ParsingHH, name_attribute, pd.DataFrame())
-            vdf = getattr(ParsingHH, name_attribute)
-            if self.load_missing_vacancy_fields:
-                # замена существующих вакансий скачанными --> оставим в ДФ
-                # только id вакансий, которые не подлежат замене
-                vacancy_exist = df_temp['id'].to_list()
-                vdf = vdf[~vdf['id'].isin(vacancy_exist)]
-            if len(vdf):
-                vdf = pd.concat([vdf, df_temp], ignore_index=True)
-            else:
-                vdf = df_temp
-            setattr(ParsingHH, name_attribute, vdf)
+
+            experience_idx = [None]
+            if found_vacancies > 2000:
+                experience_idx = ['between1And3', 'between3And6',
+                                  'noExperience', 'moreThan6']
+
+            for experience in experience_idx:
+                df_temp = self.get_vacancies_pages(load_enriched=load_enriched,
+                                                   area=area,
+                                                   employer_id=employer_id,
+                                                   specialization_id=specialization_id,
+                                                   experience=experience,
+                                                   date_from=date_from,
+                                                   date_to=date_to,
+                                                   data=data)
+
+                vdf = getattr(ParsingHH, name_attribute)
+                if self.load_missing_vacancy_fields:
+                    # замена существующих вакансий скачанными --> оставим в ДФ
+                    # только id вакансий, которые не подлежат замене
+                    vacancy_exist = df_temp['id'].to_list()
+                    vdf = vdf[~vdf['id'].isin(vacancy_exist)]
+                if len(vdf):
+                    if 'counters' not in vdf.columns:
+                        vdf['counters'] = 0
+                    vdf = pd.concat([vdf, df_temp], ignore_index=True)
+                else:
+                    vdf = df_temp
+                setattr(ParsingHH, name_attribute, vdf)
 
         elif found_vacancies > 2000:
             # делим период пополам и смотрим, что получилось
             days_off //= 2
             # первый отрезок дат
             date_to1 = date_from + timedelta(days=days_off - 1)
-            self.get_employer_all_vacancies(employer_id,
+            self.get_employer_all_vacancies(load_enriched=load_enriched,
                                             area=area,
+                                            employer_id=employer_id,
+                                            specialization_id=specialization_id,
                                             date_from=date_from,
                                             date_to=date_to1,
                                             days_off=days_off)
             # второй отрезок дат
             date_fr2 = date_to - timedelta(days=days_off - 1)
-            self.get_employer_all_vacancies(employer_id,
+            self.get_employer_all_vacancies(load_enriched=load_enriched,
                                             area=area,
+                                            employer_id=employer_id,
+                                            specialization_id=specialization_id,
                                             date_from=date_fr2,
                                             date_to=date_to,
                                             days_off=days_off)
@@ -1105,6 +1195,20 @@ class ParsingHH:
         df.employer_name.fillna('', inplace=True)
         df.drop_duplicates(inplace=True, ignore_index=True)
         return df
+
+    def make_file_area_df_csv(self, area_id):
+        return os.path.join(self.parsed_employers, f'{area_id:05}.csv')
+
+    def load_area_vacancies(self, area_id):
+        file_emp_df_csv = self.make_file_area_df_csv(area_id)
+        if os.access(file_emp_df_csv, os.F_OK):
+            tmp = pd.read_csv(file_emp_df_csv, sep=';')
+            tmp.dropna(subset=['id', 'name'], axis=0, inplace=True)
+            tmp['id'] = tmp['id'].apply(lambda x: str(int(x)))
+            if 'url' not in tmp.columns:
+                tmp['url'] = ''
+            return tmp
+        return pd.DataFrame()
 
     def make_file_emp_df_csv(self, employer_id):
         return os.path.join(self.parsed_employers, f'{employer_id:08}.csv')
@@ -1136,7 +1240,7 @@ class ParsingHH:
             employer_id, employer_name = self.files_queue.get()
             print(f'Работодатель: id={employer_id} {employer_name[:50]}')
 
-            name_attribute = f'df_{employer_id}'
+            name_attribute = self.get_name_attribute(employer_id=employer_id)
             # проверять ранее загруженные файлы с вакансиями
             if (self.checking_existing_vacancies or
                     self.load_missing_vacancy_fields):
@@ -1146,7 +1250,7 @@ class ParsingHH:
             # установим атрибут класса ДФ, в который будем собирать данные
             setattr(ParsingHH, name_attribute, emp_df)
             # Скачиваем данные о вакансиях работодателя
-            found_ = self.get_employer_all_vacancies(employer_id)
+            found_ = self.get_employer_all_vacancies(employer_id=employer_id)
             emp_df = getattr(ParsingHH, name_attribute)
             # удалим атрибут класса (ДФ уже не нужен)
             delattr(ParsingHH, name_attribute)
@@ -1172,6 +1276,7 @@ class ParsingHH:
                     self.load_missing_vacancy_fields):
                 # Если выполняем загрузку отсутствующих полей и словили капчу:
                 # очистка очереди и выход, т.к. не имеет смысла гонять цикл
+                print('Словили капчу!!!')
                 self.files_queue.queue.clear()
 
     def load_df_vacancies_from_csv(self):
@@ -1179,9 +1284,13 @@ class ParsingHH:
             self.df_vacancies = pd.read_csv(self.file_vacancies, sep=';')
             self.df_vacancies.dropna(subset=['id'], axis=0, inplace=True)
             self.df_vacancies['id'] = self.df_vacancies['id'].astype(int)
+            self.df_vacancies.sort_values(['id', 'key_skills',
+                                           'specializations'], inplace=True)
             self.df_vacancies.drop_duplicates(subset=['id'], keep='last',
                                               ignore_index=True,
                                               inplace=True)
+            if 'counters' not in self.df_vacancies.columns:
+                self.df_vacancies['counters'] = 0
             self.rows_in_vacancies = len(self.df_vacancies)
 
     def save_df_vacancies_to_csv(self):
@@ -1253,6 +1362,143 @@ class ParsingHH:
                                       self.employer_vacancies_reader,
                                       self.employer_vacancies_writer)
 
+    def areas_vacancies_multi(self, num_threads=13, areas_idxs=[]):
+        """
+        Многопоточная загрузка вакансий по регионам
+        с сохранением их в файлы .csv
+        :param num_threads: Количество потоков
+        :param areas_idxs: список регионов для обработки
+        :return: None
+        """
+        self.specializations = self.make_dict_specializations(
+            return_category=True, only_IT=True)
+        # удаление корневой специализации
+        if '1' in self.specializations:
+            self.specializations.remove('1')
+
+        # добавление в множество списка ИТ-специализаций из других разделов
+        self.specializations.extend(self.add_it_specs)
+
+        # чтение файла загруженных вакансий по регионам
+        # self.load_df_vacancies_from_csv()
+
+        # Вызов функции управления потоками и передача в неё параметров
+        self.multithreaded_processing(num_threads,
+                                      (self.make_queue_areas_ids, areas_idxs),
+                                      self.area_vacancies_reader,
+                                      self.area_vacancies_writer)
+
+    def area_vacancies_writer(self):
+        """
+        ПИСАТЕЛЬ
+        :return: None
+        """
+        while True:
+            # ожидаем получение данных
+            if self.data_queue.empty():
+                # !!!!! проверяем: живы ли потоки читателей url_reader() !!!!!
+                if self.event_reader.is_set():
+                    # если очередь пуста и все читатели завершили работу - ТО:
+                    print_time(self.rq_time)
+                    # конец работы - завершаем цикл
+                    break
+            else:
+                # запишем в лог обработанные индексы регионов
+                area_id, area_name = self.data_queue.get()
+                # запишем в лог area_id обработанного региона
+                with open(self.parsed_employers_log, 'a+') as fw:
+                    fw.write(f'{area_id}\n')
+
+    def area_vacancies_reader(self, idx_thread):
+        """
+        ЧИТАТЕЛЬ: Получение всех вакансий региона
+        :param idx_thread: номер потока
+        :return: None
+        """
+        while True:
+            # Проверяем, есть ли данные в очереди
+            if self.files_queue.empty():
+                print(f'Поток {idx_thread} завершен.')
+                # выходим из цикла
+                break
+
+            # если установлена задержка - установим
+            if self.delay:
+                time.sleep(self.get_time_sleep())
+
+            # Получаем регион из очереди
+            area_id, area_name = self.files_queue.get()
+
+            # Родительская '113' --> Россия
+            if str(area_id) == '113':
+                continue
+
+            found = 0
+            # проверим количество вакансий по всем специализациям ИТ
+            it_sps = ['1'] + self.add_it_specs
+            params = {'area': area_id, 'specialization': it_sps, 'per_page': 3}
+            data = self.download_page("https://api.hh.ru/vacancies", params)
+
+            if data.get('errors', None) is None and 'found' in data.keys():
+                found = data['found']
+                print(f'Регион: {area_id} - {area_name}, ИТ вакансий: {found}')
+            else:
+                if data.get('description', None) is None:
+                    # словили ошибку про требование ввода капчи->ставим
+                    # глобальный флаг, чтобы больше не читать вакансии
+                    self.processing_captcha(data)
+                else:
+                    # получили ошибку description": "Not Found"
+                    data = None
+
+            specialization_idxs = []
+            if found:
+                if found < 10000:
+                    specialization_idxs = ['1'] + self.add_it_specs
+                else:
+                    specialization_idxs = self.specializations
+
+            # specialization_idxs = self.specializations
+
+            area_df = pd.DataFrame()
+            for specialization_id in specialization_idxs:
+                # Скачиваем данные о вакансиях по региону и специализации
+                sp_df = pd.DataFrame()
+                name_attribute = self.get_name_attribute(area=area_id,
+                                                         specialization_id=specialization_id)
+                setattr(ParsingHH, name_attribute, sp_df)
+                # load_enriched = False <-- для ускорения загрузки
+                self.get_employer_all_vacancies(load_enriched=False,
+                                                area=area_id,
+                                                specialization_id=specialization_id,
+                                                days_off=64)
+                sp_df = getattr(ParsingHH, name_attribute)
+                delattr(ParsingHH, name_attribute)
+                area_df = pd.concat([area_df, sp_df], ignore_index=True)
+
+            area_df.drop_duplicates(subset=['id'], ignore_index=True,
+                                    inplace=True)
+            # Если вакансии найдены:
+            if len(area_df):
+                # сохраняем в .csv если были найдены вакансии
+                file_emp_df_csv = self.make_file_area_df_csv(area_id)
+                area_df.to_csv(file_emp_df_csv, sep=';', index=False)
+                # Помещаем данные в выходную очередь
+                self.data_queue.put((area_id, area_name))
+            elif not self.errors_captcha_required:
+                print(f'Ошибка получения данных area_id:{area_id}')
+                # ошибка при получении данных --> запишем в лог area_id
+                # обработанного региона
+                with open(self.parsed_employers_log.replace('.log', '.errors'),
+                          'a+') as fw:
+                    fw.write(f'{area_id};{found}\n')
+
+            if self.errors_captcha_required:
+                # Если выполняем загрузку отсутствующих полей и словили капчу:
+                # очистка очереди и выход, т.к. не имеет смысла гонять цикл
+                self.files_queue.queue.clear()
+                pass
+
     def read_parsed_employers_log(self):
         """
         Чтение из лог-файла идентификаторов обработанных работодателей
@@ -1261,6 +1507,18 @@ class ParsingHH:
         if os.access(self.parsed_employers_log, os.F_OK):
             tmp = pd.read_csv(self.parsed_employers_log, header=None)
             tmp.columns = ['idx']
+            return set(tmp['idx'].values)
+        return set()
+
+    def read_parsed_employers_log_errors(self):
+        """
+        Чтение из лог-файла идентификаторов ошибок обработанных работодателей
+        :return: множество идентификаторов
+        """
+        errors_log = self.parsed_employers_log.replace('.log', '.errors')
+        if os.access(errors_log, os.F_OK):
+            tmp = pd.read_csv(errors_log, header=None, sep=';')
+            tmp.columns = ['idx', 'cnt']
             return set(tmp['idx'].values)
         return set()
 
@@ -1490,6 +1748,8 @@ class ParsingHH:
             data = self.read_json(file_json)
         else:
             data = self.download_page('https://api.hh.ru/specializations')
+            with open(file_json, 'w') as outfile:
+                json.dump(data, outfile)
         self.category_specializations = dict()
         for row in data:
             row_id, row_name = self.get_id_name_from_dict(row)
@@ -1581,7 +1841,90 @@ class ParsingHH:
             else:
                 df = pd.concat([df, tmp], ignore_index=True)
         df.drop_duplicates(df.columns[:3], keep='last', inplace=True)
-        return df
+        # вернем ДС с количеством вакансий / резюме в отсутствующие даты
+        return self.fillna_counts(df)
+
+    @staticmethod
+    def fillna_counts(dfc):
+        """
+        Заполнение полей с количеством вакансий / резюме за пропущенные даты
+        :param dfc: исходный ДФ
+        :return: обработанный ДФ
+        """
+        df_columns = dfc.columns.to_list()
+        # имя колонки с идентификатором или названием
+        id_col = df_columns[1]
+        # имя колонки с количеством вакансий / резюме
+        cnt_column = df_columns[-1]
+        # если колонка с датой не datetime --> преобразуем в datetime
+        if is_string_dtype(dfc['date']):
+            dfc['date'] = pd.to_datetime(dfc['date'])
+        min_dt = dfc['date'].min()
+        max_dt = dfc['date'].max()
+        dfc_dates = set(dfc['date'].to_list())
+        all_dates = set(datetime.fromordinal(dt) for dt in
+                        range(min_dt.toordinal(), max_dt.toordinal() + 1))
+        nan_dates = sorted(all_dates - dfc_dates)
+        print('Отсутствующие даты:', nan_dates)
+
+        # заполнение данных по пропущенным данным
+        print('Колонки для группировки:', df_columns[1:-1])
+        grp = dfc.groupby(df_columns[1:-1], as_index=False)[cnt_column].count()
+        grp.insert(0, 'date', np.NaN)
+        # новые колонки в ДФ
+        new_columns = ['linear', 'imputer', 'lin_imp']
+        for nan_date in nan_dates:
+            print(f'Обрабатываю дату: {nan_date.date()}')
+            grp['date'] = nan_date
+            grp[cnt_column] = np.NaN
+            # добавление пустых данных отсутствующей даты
+            df = pd.concat([dfc, grp])
+            # сортировка по дате и ID
+            df.sort_values(df_columns[:2], inplace=True, ignore_index=True)
+
+            # создание новых колонок и заполнение их значением количества
+            for col in new_columns:
+                df[col] = df[cnt_column]
+
+            fillna_df = pd.DataFrame(columns=df.columns)
+            for df_id in grp[id_col].unique():
+                temp = df.loc[df.id == df_id]
+                temp.set_index('date', drop=False, inplace=True)
+                # дату в цифру с начала эпохи
+                temp['date'] = temp['date'].map(lambda x: x.toordinal())
+                # заполнение пропусков линейной интерполяцией
+                temp['linear'].interpolate(method='linear',
+                                           limit_direction='both',
+                                           inplace=True)
+                # заполнение пропусков KNNImputer
+                imp = KNNImputer(n_neighbors=4, weights="distance")
+                res = imp.fit_transform(temp[['date', 'imputer']])
+                temp['imputer'] = res[:, -1]
+                # считаем среднее по двух методам заполнения пропусков
+                temp['lin_imp'] = (temp['linear'] + temp['imputer']) / 2
+                # дату обратно в дату
+                temp['date'] = temp['date'].map(lambda x:
+                                                datetime.fromordinal(x))
+                # добавление данных по одному ID
+                fillna_df = pd.concat([fillna_df, temp])
+
+            # на всякий случай заполним пропуски нулями
+            fillna_df.fillna(0, inplace=True)
+            for col in new_columns:
+                fillna_df[col] = fillna_df[col].round().astype(int)
+
+            # выберем из ДФ только строки с датой с пропущенными значениями
+            temp = fillna_df[fillna_df.date == nan_date].reset_index(drop=True)
+            temp[cnt_column] = temp['lin_imp']
+            temp.drop(new_columns, axis=1, inplace=True)
+            # добавление данных отсутствующей даты
+            dfc = pd.concat([dfc[dfc.date != nan_date], temp])
+            dfc.sort_values(df_columns[:2], inplace=True, ignore_index=True)
+
+        # преобразование даты в строку
+        if not is_string_dtype(dfc['date']):
+            dfc['date'] = dfc['date'].dt.date
+        return dfc
 
     def make_spec_to_category(self):
         # получаем специализации по категориям
@@ -1615,6 +1958,7 @@ class ParsingHH:
         df_merge = df_vr[0].merge(df_vr[1],
                                   on=df_vr[0].columns.values.tolist()[:3],
                                   how='outer')
+
         # объединяем эти ДФ concat
         df_columns = 'date;id;specialization;counts'.split(';')
         df_concat = df_vr[0]
@@ -1639,8 +1983,9 @@ class ParsingHH:
     def make_df_vacancies_from_csv(self):
         self.load_df_vacancies_from_csv()
         files_path = Path(self.parsed_employers)
-        pbar = tqdm(total=sum(1 for _ in files_path.glob('*.csv')))
-        for file in sorted(files_path.glob('*.csv')):
+        files_csv = sorted(files_path.glob('*.csv'))
+        pbar = tqdm(total=sum(1 for _ in files_csv))
+        for file in files_csv:
             # self.print_read_msg(file)
             pbar.update(1)
             # если файл не пустой
@@ -1652,6 +1997,8 @@ class ParsingHH:
                     df['id'] = df['id'].astype(int)
                     if 'url' not in df.columns:
                         df['url'] = ''
+                    if 'counters' not in df.columns:
+                        df['counters'] = 0
                     if not len(self.df_vacancies):
                         self.df_vacancies = df
                     else:
@@ -1659,6 +2006,8 @@ class ParsingHH:
         pbar.close()
         # удалим дубликаты вакансий
         self.df_vacancies['id'] = self.df_vacancies['id'].astype(int)
+        self.df_vacancies.sort_values(['id', 'key_skills', 'specializations'],
+                                      inplace=True)
         self.df_vacancies.drop_duplicates(subset=['id'], keep='last',
                                           ignore_index=True,
                                           inplace=True)
@@ -1828,6 +2177,8 @@ class ParsingHH:
             self.df_incomplete['id'] = self.df_incomplete['url'].apply(
                 lambda x: re.findall(pattern, x)[0])
             self.df_incomplete['id'] = self.df_incomplete['id'].astype(int)
+            self.df_incomplete.sort_values(['id', 'key_skills',
+                                            'specializations'], inplace=True)
             self.df_incomplete.drop_duplicates(subset=['id'], keep='last',
                                                ignore_index=True,
                                                inplace=True)
@@ -1844,6 +2195,7 @@ class ParsingHH:
         """
         # чтение файла с вакансиями
         self.load_df_vacancies_from_csv()
+        print('Кол-во загруженных вакансий:', len(self.df_vacancies))
         flt = self.df_vacancies[self.keys_not_item].isna().all(axis=1)
         full_nan = self.df_vacancies[flt].sort_values('name', ascending=False)
         print('Кол-во неполных вакансий:', len(full_nan))
@@ -1895,8 +2247,7 @@ class ParsingHH:
                     # словили ошибку про требование ввода капчи --> ставим
                     # глобальный флаг, чтобы больше не читать вакансии
                     # очистка очереди и выход, т.к. не имеет смысла гонять цикл
-                    print('Словили капчу!!!')
-                    self.errors_captcha_required = True
+                    self.processing_captcha(enriched)
                     self.files_queue.queue.clear()
                     break
                 else:
@@ -1933,8 +2284,8 @@ class ParsingHH:
                         row['description'] = ' '.join(description.split())
                 # добавляем данные в итоговый ДФ
                 self.df_incomplete.loc[len(self.df_incomplete)] = row
-                # Если вакансий добавлено более 200 записей сохраним ДФ
-                if len(self.df_incomplete) - self.rows_in_incomplete > 200:
+                # Если вакансий добавлено более 300 записей сохраним ДФ
+                if len(self.df_incomplete) - self.rows_in_incomplete >= 300:
                     self.save_incomplete_vacancies_to_csv()
 
     def save_incomplete_vacancies_to_csv(self):
@@ -1976,8 +2327,11 @@ if __name__ == "__main__":
 
     # hh_obj.make_all_employers()
 
-    # hh_obj.get_vacancies_pages(4167)
-    # hh_obj.employers_vacancies_multi(num_threads=1, idxs_employers=[3592])
+    # 2748 - Ростелеком
+    # hh_obj.file_vacancies = os.path.join(hh_obj.path_file, 'df_2748.csv')
+    # df = hh_obj.get_vacancies_pages(2748)
+    # df.to_csv('df_2748.csv', index=False, sep=';', encoding='cp1251')
+    # hh_obj.employers_vacancies_multi(num_threads=1, idxs_employers=[2748])
 
     # res = hh_obj.make_patterns(is_IT=True)
     # print(res)
@@ -1991,18 +2345,18 @@ if __name__ == "__main__":
     # res = hh_obj.get_selected_resume_info()
     # print(res.get('found', 0))
 
-    result = hh_obj.make_dict_specializations(return_category=True)
-    result = {key: val[0] for key, val in result.items()}
-    print(*result.items(), sep='\n')
-    df = pd.DataFrame(data=result.items(), columns=['id', 'specializations'])
-    df.to_csv('specializations.csv', index=False, sep=';', encoding='cp1251')
+    # result = hh_obj.make_dict_specializations(return_category=True)
+    # result = {key: val[0] for key, val in result.items()}
+    # print(*result.items(), sep='\n')
+    # df = pd.DataFrame(data=result.items(), columns=['id', 'specializations'])
+    # df.to_csv('specializations.csv', index=False, sep=';', encoding='cp1251')
     #
     # hh_obj.make_dict_professional_roles()
     # print(*hh_obj.category_prof_roles.items(), sep='\n')
 
-    # temp = hh_obj.files_from_job_monitoring_to_df()
-    # print(temp)
-    # print(temp.info())
+    tmp = hh_obj.files_from_job_monitoring_to_df(kind='resume')
+    print(tmp)
+    # print(dfc.id.unique())
 
     # # сбор данных по вакансиям и резюме из файлов
     # temp = hh_obj.join_vacancy_resume(search='specialization', only_IT=False)
@@ -2079,3 +2433,39 @@ if __name__ == "__main__":
     # print(len(files))
     # print(files[:5])
     # print(files[-5:])
+
+    # # Тест количества вакансий по специализациям
+    # specializations = hh_obj.make_dict_specializations(return_category=True,
+    #                                                    only_IT=True)
+    # if '1' in specializations:
+    #     specializations.remove('1')
+    # print(specializations)
+    # for specialization in specializations:
+    #     params = {'area': 1,
+    #               'specialization': specialization,
+    #               'per_page': 10
+    #               }
+    #     data = hh_obj.download_page("https://api.hh.ru/vacancies", params)
+    #     print(f'Специализация {specialization}, Количество вакансий:',
+    #           data['found'])
+
+    # # postfix='_IT'
+    # hh_obj = ParsingHH(postfix='_IT')
+    # # чтение файла с вакансиями
+    # hh_obj.load_df_vacancies_from_csv()
+    # print('Кол-во загруженных вакансий:', len(hh_obj.df_vacancies))
+    # flt = hh_obj.df_vacancies[hh_obj.keys_not_item].isna().all(axis=1)
+    # full_nan = hh_obj.df_vacancies[flt]
+    # print('Кол-во неполных вакансий:', len(full_nan))
+    # hh_obj.df_vacancies = hh_obj.df_vacancies[~flt]
+    # print('Кол-во полных вакансий:', len(hh_obj.df_vacancies))
+    # # hh_obj.save_df_vacancies_to_csv()
+    #
+    # # чтение файла с неполными вакансиями
+    # hh_obj.load_incomplete_vacancies_from_csv()
+    # idxs = set(hh_obj.df_incomplete['id'].to_list())
+    # print(f'Кол-во дозагруженных вакансий: {len(idxs)}')
+    #
+    # hh_obj.df_vacancies = pd.concat(
+    #     [hh_obj.df_vacancies, hh_obj.df_incomplete])
+    # hh_obj.save_df_vacancies_to_csv()

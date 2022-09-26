@@ -1,7 +1,6 @@
 import os
 import re
 import pandas as pd
-import scipy.stats as stats
 from bs4 import BeautifulSoup
 from datetime import datetime
 from parsing_hh import ParsingHH
@@ -145,7 +144,7 @@ class ParsingTT(ParsingHH):
 
     def make_list_courses(self):
         """
-        Формирование списка курсов по разделам в ДФ и сохрание в файл .csv
+        Формирование списка курсов по разделам в ДФ и сохранение их в файл .csv
         :return: None
         """
         name_html = 'TutorTop.ru - агрегатор-отзовик всех онлайн-курсов.html'
@@ -238,7 +237,7 @@ class ParsingTT(ParsingHH):
         # преобразуем в целое число
         for name_col in ('price', 'rassrochka'):
             df[name_col] = df[name_col].astype(int)
-        # приведение отсутствии рассрочки к одному виду
+        # приведение отсутствие рассрочки к одному виду
         df.loc[df['rassrochka'] == 1, 'rassrochka'] = 0
         # преобразование даты из unixtime формата в читаемую дату
         df['date'] = df['date'].apply(
@@ -289,7 +288,7 @@ class ParsingTT(ParsingHH):
 if __name__ == "__main__":
     tt_obj = ParsingTT()
 
-    # Чтение из файла данных о загруженных курсах
+    # Чтение из файла данных о загруженных курсах и очистка данных
     tt_obj.preprocess_df_courses()
     tt_obj.read_df_processed_courses()
     df = tt_obj.df_courses_proc

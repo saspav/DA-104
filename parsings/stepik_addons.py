@@ -152,7 +152,7 @@ class MakeTask:
         if self.browser.find_elements(By.CLASS_NAME, 'attempt-message_wrong'):
             print('Неверное решение!!!')
             # что-то пошло не так подержим браузер 30 сек
-            __import__('time').sleep(30)
+            sleep(30)
         else:
             print('Решено верно!!!')
 
@@ -827,101 +827,10 @@ class MakeHTML:
 
 if __name__ == "__main__":
     # BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    #
-    # # stepik_ini = ReadINI(base_dir=BASE_DIR, course_name='SQL_EXT')
-    # # print(stepik_ini.title)
-    # # print(stepik_ini.url_course)
-    # # print(stepik_ini.sql_url)
-    # # print(stepik_ini.lessons_page)
-    # # print(stepik_ini.processed_steps)
-    # # raise ValueError
-    #
-    # empty_html = 'empty.html'
-    # main_page = 'index.html'
-    # lessons_page = 'test_steps.html'
-    # #
-    # # весь курс по шагам
-    # lessons = MakeHTML(base_dir=BASE_DIR)
-    # lessons.processed_steps = 'test_steps.csv'
-    # lessons.read_processed_steps()
-    # lessons.html_text = lessons.read_html_file(empty_html,
-    #                                            dir_page=lessons.BASE_DIR)
-    # lessons.soup_page()
-    # lessons.title = 'Интерактивный тренажер по SQL'
-    # lessons.url_course = 'https://stepik.org/course/63054/syllabus'
-    # lessons.add_page_title()
-    # #
-    # # print(lessons.processed_urls.url.tolist())
-    # # print(lessons.processed_urls.iloc[-1].url)
-    #
-    # # чтение файла с уроками + готовим суп из страницы
-    # # lessons.make_lessons_links(lessons_page)
-    # #
-    # # print(lessons.links)
-    # # загрузка файлов на странице
-    # # lessons.load_files_from_links()
-    # #
-    # # [print(f'{key}: {val}') for key, val in lessons.link_file.items()]
-    #
-    # # # прочитаем словарь url - имя файла
-    # # lessons.link_file = lessons.read_link_file()
-    # # # изменение url картинок на локальный путь к файлам
-    # # lessons.replace_link_to_file(html_doc=lessons.step_soup)
-    # # # сохранение html в файл
-    # # lessons.html_soup.prettify()
-    # # lessons.save_html_file('test.html')
-    #
-    # # lessons.soup_page()
-    # # lessons.title = 'Интерактивный тренажер по SQL'
-    # # lessons.url_course = 'https://stepik.org/course/63054/syllabus'
-    # # lessons.add_page_title()
-    # #
-    #
-    # lessons.step_url = 'https://stepik.org/lesson/297508/step/8?unit=279268'
-    # save_main_page = True
-    # if save_main_page:
-    #     lessons.make_browser()
-    #     lessons.get_page(lessons.step_url)
-    #     # wait_sidebar = False
-    #     # sidebar, _ = lessons.get_page(lessons.step_url,
-    #     #                               wait_sidebar=wait_sidebar)
-    #     # sidebar.click()
-    #     # sleep(3)
-    #     lessons.get_page(lessons.step_url, wait_sidebar=False)
-    #     sleep(3)
-    #
-    #     # сохраним для опытов эту страницу
-    #     lessons.save_html_file(lessons_page, html_text=lessons.page_source)
-    # else:
-    #     # чтение файла с уроками
-    #     lessons.page_source = lessons.read_html_file(lessons_page)
-    #
-    # # инициализация урока
-    # lessons.clear_step()
-    # # готовим суп из страницы
-    # lessons.step_make_soup()
-    # # # формирование блока с названием раздела и шага
-    # # lessons.add_step_top()
-    # # Содержание урока
-    # lessons.add_lesson_content()
-    # # формирование нового блока с кодом решения
-    # lessons.make_step_attempt()
-    # # lessons.now_attempt = lessons.step_soup.select('.attempt')
-    #
-    # # сборка урока в кучу и добавление его в тело общего html
-    # lessons.add_step_attempt()
-    # # добавление урока в html
-    # lessons.add_body_child(lessons.now_step)
-    # # сохранение html в файл
-    # lessons.html_soup.prettify()
-    # lessons.save_html_file('test.html')
-    # # сохранение файла с обработанными ссылками шагов
-    # lessons.add_processed_steps()
-    # lessons.write_processed_steps()
-    #
-    # if save_main_page:
-    #     lessons.browser.close()
-
-    task = MakeTask()
-    task.auth_stepik()
-    task.solution()
+    BASE_DIR = 'D:\python-txt\stepik'
+    stepik_ini = ReadINI(base_dir=BASE_DIR, course_name='SQL_EXT')
+    print(stepik_ini.title)
+    print(stepik_ini.url_course)
+    print(stepik_ini.sql_url)
+    print(stepik_ini.lessons_page)
+    print(stepik_ini.processed_steps)
